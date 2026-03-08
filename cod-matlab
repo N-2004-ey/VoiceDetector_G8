@@ -1,0 +1,108 @@
+function output_mask = VoiceDetector_G8(x, Fa)  
+    % 1. Preparação do Sinal    
+    % filtro passa-alta em 70Hz para remover offset
+    fc = 70;
+    [b, a] = butter(2, fc/(Fa/2), 'high'); 
+    x_filtered = filter(b, a, x);
+    
+    % derivada do sinal para a taxa de passagem por zero
+    d = diff([0; x_filtered]); 
+    
+    % 2. Preparação da Janela
+    % Tempo da janela de 10ms (empiricamente testado)
+    window_time = 0.01;
+    win_length = round(window_time * Fa);
+    step_size = round(win_length/2);
+
+    % Utiliza a janela de hanning
+    w = hann(win_length);
+    
+    % Inicializa a máscara como um array de zeros
+    output_mask = zeros(length(x), 1);
+    
+    % 2.5 Cálculo de ruído inicial (usado para definir os thresholds)
+
+    % Assume que os primeiros 200ms do áudio são puro silêncio
+    noise_duration = round(0.2 * Fa); 
+    
+    % Extrai os segmentos de ruído
+    noise_x = x_filtered(1 : noise_duration);
+    noise_d = d(1 : noise_duration);
+    
+    % Calcula a energia do sinal de ruído
+    baseline_energy = sum(noise_x .^ 2) / length(noise_x);
+    
+    % Calcula a taxa de passagem por zero para o ruído de fundo
+    baseline_zcr = sum(abs(diff(sign(noise_d)))) / length(noise_d);
+    
+    % Calculo dos thresholds 
+    % Fala deve ser 5 vezes maior que o ruído de fundo
+    threshold_energy = baseline_energy * 5.0; 
+    
+    % NOVO: Limiar de energia mais baixo para sons não-vozeados (ex: fricativas)
+    % Apenas 1.5 a 2 vezes maior que o ruído
+    threshold_energy_unvoiced = baseline_energy * 1.5;
+    
+    % Taxa de passagem por zero para sinais não vozeados deve ser 1.5 vezes
+    % maior que o ruído de fundo
+    threshold_zcr = baseline_zcr * 1.5;      
+    
+    % Apenas caso o ruído de fundo seja quase nulo
+    if threshold_energy < 0.00001
+        threshold_energy = 0.00001;
+    end
+    
+    % 3. Janela deslizante
+    % Fazemos o loop através do sinal pulando de acordo com o "step_size"
+    for i = 1 : step_size : (length(x) - win_length + 1)
+        
+        % Define o índice inicial e final para o segmento atual
+        idx_start = i;
+        idx_end = i + win_length - 1;
+        
+        % Extrai o segmento atual
+        x_seg = x_filtered(idx_start : idx_end);
+        
+        % Aplica a janela e calcula a energia média deslizante
+        % Formula: E(n) = 1/(N+1) * sum((x * w)^2) 
+        windowed_x = x_seg .* w;
+        current_energy = sum(windowed_x .^ 2) / win_length;
+        
+        % Ajuste do ZCR: Captura uma amostra extra à esquerda do segmento atual para 
+        % viabilizar o cálculo da diferença 'd(m) - d(m-1)'. Se for o primeiro segmento, 
+        % preenche com zero para evitar erro de índice.
+        if idx_start == 1
+            d_seg_extended = [0; d(idx_start : idx_end)]; 
+        else
+            d_seg_extended = d(idx_start - 1 : idx_end);
+        end
+        
+        % Aplica a janela e calcula a taxa de passagem por zero na derivada
+        % do sinal
+        % Formula: Z(n) = sum(|sign(d(m)) - sign(d(m-1))| * w) / N
+        sign_changes = abs(diff(sign(d_seg_extended)));
+        windowed_zcr = sign_changes .* w;
+        current_zcr = sum(windowed_zcr) / win_length;  
+        
+        % Condição 1: há energia suficiente no segmento para ser
+        % considerado fala
+        is_speech_energy = current_energy > threshold_energy;
+        
+        % Condição 2: Usa o limiar não vozeado e a taxa de passagem por
+        % zero
+        % Assim, o som pode ter energia baixa (mas acima do ruído) desde que tenha alto ZCR
+        is_unvoiced = (current_zcr > threshold_zcr) && (current_energy > threshold_energy_unvoiced);
+        
+        if is_speech_energy || is_unvoiced
+            output_mask(idx_start : idx_end) = 1; 
+        end
+        
+    end
+    
+    % 5. Pós-processamento (suavização)
+    
+    % Aplica um filtro de mediana
+    smooth_window = round(0.20 * Fa);
+    output_mask = medfilt1(output_mask, smooth_window);
+    
+end
